@@ -66,7 +66,7 @@ public class IndexHelper {
 
     private final Source<JsonNode> source;
     private final Sink<JsonNode> writer;
-    private final Converter<JsonNode> converter;
+    private final Converter<JsonNode, JsonNode> converter;
 
     /**
      * Builder for an Indexer. More options to come.
@@ -74,7 +74,7 @@ public class IndexHelper {
     public static class Builder {
         private final List<Source<JsonNode>> sources = Lists.newArrayList();
         private final List<Sink<JsonNode>> writers = Lists.newArrayList();
-        private final List<Converter<JsonNode>> converters = Lists.newArrayList();
+        private final List<Converter<JsonNode, JsonNode>> converters = Lists.newArrayList();
 
         public Builder addSink(Sink<JsonNode> writer) {
             writers.add(writer);
@@ -106,7 +106,7 @@ public class IndexHelper {
             return this;
         }
 
-        public Converter<JsonNode> getConverter() {
+        public Converter<JsonNode, JsonNode> getConverter() {
             if (converters.size() > 1) {
                 return new MultiConverter<>(converters);
             } else if (converters.size() == 1) {
@@ -116,7 +116,7 @@ public class IndexHelper {
             }
         }
 
-        public Builder addConverter(Converter<JsonNode> converter) {
+        public Builder addConverter(Converter<JsonNode, JsonNode> converter) {
             this.converters.add(converter);
             return this;
         }
