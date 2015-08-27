@@ -35,7 +35,6 @@ import java.util.Properties;
 public class IndexHelper extends Pipeline<JsonNode, JsonNode> {
 
     public static final String PROGRAM_NAME = "index-helper";
-    public static final String VERSION_NUMBER = "1.0.1";
 
     /**
      * Default service end points.
@@ -175,7 +174,8 @@ public class IndexHelper extends Pipeline<JsonNode, JsonNode> {
         CommandLine cmd = parser.parse(options, args);
 
         if (cmd.hasOption(VERSION)) {
-            System.out.println(PROGRAM_NAME + " " + VERSION_NUMBER);
+            String version = IndexHelper.class.getPackage().getImplementationVersion();
+            System.out.println(PROGRAM_NAME + " " + version);
             System.exit(0);
         }
 
