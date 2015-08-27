@@ -6,6 +6,7 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import eu.ehri.project.indexing.converter.Converter;
 import eu.ehri.project.indexing.converter.impl.JsonConverter;
+import eu.ehri.project.indexing.converter.impl.NoopConverter;
 import eu.ehri.project.indexing.index.Index;
 import eu.ehri.project.indexing.index.impl.SolrIndex;
 import eu.ehri.project.indexing.sink.Sink;
@@ -220,9 +221,9 @@ public class IndexHelper extends Pipeline<JsonNode, JsonNode> {
 
         // Determine if we want to convert the data or print the incoming
         // JSON as-is...
-        if (!cmd.hasOption(NO_CONVERT)) {
-            builder.addConverter(new JsonConverter());
-        }
+        builder.addConverter(cmd.hasOption(NO_CONVERT)
+            ? new NoopConverter<JsonNode>()
+            : new JsonConverter());
 
         // See if we want to print stats... if so create a callback sink
         // to count the individual items and optionally print them...
