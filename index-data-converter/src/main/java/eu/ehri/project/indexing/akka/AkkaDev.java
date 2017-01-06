@@ -116,10 +116,6 @@ public class AkkaDev {
                     return Pair.create(request, relativeUri);
                 })
                 .via(cachedHostFlow(uri))
-                .map(p -> {
-                    System.out.println(p);
-                    return p;
-                })
                 .filter(p -> p.first().isSuccess()) // FIXME: Handle errors?
                 .map(p -> p.first().get())
                 .flatMapConcat(r -> r.entity().withoutSizeLimit().getDataBytes())
@@ -145,20 +141,11 @@ public class AkkaDev {
     public Flow<Pair<HttpRequest, Uri>, JsonNode, akka.NotUsed> requestsToJsonNode(Uri uri) {
         return Flow
                 .<Pair<HttpRequest, Uri>>create()
-                .map(p -> {
-                    System.out.println(p);
-                    return p;
-                })
                 .via(cachedHostFlow(uri))
-                .map(p -> {
-                    System.out.println(p);
-                    return p;
-                })
                 .filter(p -> p.first().isSuccess()) // FIXME: Handle errors?
                 .map(p -> {
                     HttpResponse response = p.first().get();
                     Uri u = p.second();
-                    System.out.println("Response from " + u + ": " + response.status());
                     return response;
                 })
                 .flatMapConcat(r ->

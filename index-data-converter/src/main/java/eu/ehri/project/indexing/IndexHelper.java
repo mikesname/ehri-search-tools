@@ -7,13 +7,11 @@ import akka.http.javadsl.model.Uri;
 import akka.stream.ActorMaterializer;
 import akka.stream.IOResult;
 import akka.stream.Materializer;
-import akka.stream.javadsl.Broadcast;
 import akka.stream.javadsl.Concat;
 import akka.stream.javadsl.Flow;
-import akka.stream.javadsl.GraphDSL;
+import akka.stream.javadsl.Keep;
 import akka.stream.javadsl.Sink;
 import akka.stream.javadsl.Source;
-import akka.stream.javadsl.StreamConverters;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.base.Splitter;
 import com.google.common.collect.Iterables;
@@ -21,6 +19,7 @@ import com.google.common.collect.Lists;
 import eu.ehri.project.indexing.akka.AkkaDev;
 import eu.ehri.project.indexing.index.Index;
 import eu.ehri.project.indexing.index.impl.SolrIndex;
+import eu.ehri.project.indexing.utils.Stats;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
 import org.apache.commons.cli.DefaultParser;
@@ -277,6 +276,11 @@ public class IndexHelper {
         Source<JsonNode, NotUsed> allSrc = combineSources(sources);
         Flow<JsonNode, JsonNode, NotUsed> allConverters = chainConverters(converters);
 
+        final Stats stats = new Stats();
+        Sink<JsonNode, CompletionStage<Done>> statsSink = cmd.hasOption(VERBOSE) || cmd.hasOption(STATS)
+                ? Sink.foreach(f -> stats.incrementCount())
+                : Sink.<JsonNode>ignore();
+
         Sink<JsonNode, CompletionStage<IOResult>> printSink = !cmd.hasOption(INDEX) || cmd.hasOption(PRINT) || cmd.hasOption(PRETTY)
                 ? streams.jsonNodeOutputStreamSink(() -> System.out, true)
                 : Sink.<JsonNode>ignore().mapMaterializedValue(f -> f.thenApply(d -> IOResult.createSuccessful(0L)));
@@ -286,9 +290,16 @@ public class IndexHelper {
                 : Sink.<JsonNode>ignore().mapMaterializedValue(f -> f.thenApply(d -> IOResult.createSuccessful(0L)));
 
         allSrc.via(allConverters)
-                .alsoToMat(printSink, (u, m) -> m)
-                .toMat(solrSink, (u, m) -> m).run(mat)
-        .toCompletableFuture().get();
+                .alsoToMat(printSink, Keep.right())
+                .alsoToMat(statsSink, Keep.right())
+                .toMat(solrSink, Keep.right())
+                .run(mat)
+                .toCompletableFuture()
+                .get();
+
+        if (cmd.hasOption(VERBOSE) || cmd.hasOption(STATS)) {
+            stats.printReport(System.err);
+        }
 
         system.terminate();
     }
