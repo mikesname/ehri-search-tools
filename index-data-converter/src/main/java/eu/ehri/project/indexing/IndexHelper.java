@@ -285,9 +285,9 @@ public class IndexHelper {
                 ? streams.jsonNodeOutputStreamSink(() -> System.out, true)
                 : Sink.<JsonNode>ignore().mapMaterializedValue(f -> f.thenApply(d -> IOResult.createSuccessful(0L)));
 
-        Sink<JsonNode, CompletionStage<?>> solrSink = cmd.hasOption(INDEX)
+        Sink<JsonNode, CompletionStage<String>> solrSink = cmd.hasOption(INDEX)
                 ? streams.jsonNodeHttpSink(Uri.create(solrUrl + "/update?commit=true"))
-                : Sink.<JsonNode>ignore().mapMaterializedValue(f -> f.thenApply(d -> IOResult.createSuccessful(0L)));
+                : Sink.<JsonNode>ignore().mapMaterializedValue(f -> f.thenApply(Object::toString));
 
         allSrc.via(allConverters)
                 .alsoToMat(printSink, Keep.right())

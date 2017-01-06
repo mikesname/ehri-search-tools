@@ -1,6 +1,5 @@
 package eu.ehri.project.indexing.akka;
 
-import akka.Done;
 import akka.NotUsed;
 import akka.actor.ActorSystem;
 import akka.http.javadsl.ConnectHttp;
@@ -10,7 +9,6 @@ import akka.http.javadsl.common.EntityStreamingSupport;
 import akka.http.javadsl.common.JsonEntityStreamingSupport;
 import akka.http.javadsl.model.ContentTypes;
 import akka.http.javadsl.model.HttpEntities;
-import akka.http.javadsl.model.HttpEntity;
 import akka.http.javadsl.model.HttpMethods;
 import akka.http.javadsl.model.HttpRequest;
 import akka.http.javadsl.model.HttpResponse;
@@ -33,15 +31,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import com.google.common.collect.Lists;
-import com.google.common.io.Resources;
 import eu.ehri.project.indexing.converter.impl.JsonConverter;
 import scala.concurrent.duration.FiniteDuration;
 import scala.util.Try;
 
-import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.io.PrintStream;
 import java.util.List;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
@@ -74,7 +69,7 @@ public class AkkaDev {
                 .withIdleTimeout(timeout);
         this.connectionPoolSettings = ConnectionPoolSettings
                 .create(actorSystem)
-                //.withConnectionSettings(clientConnectionSettings)
+                .withConnectionSettings(clientConnectionSettings)
                 .withIdleTimeout(timeout);
         this.jsonConverter = new JsonConverter();
     }
@@ -83,16 +78,16 @@ public class AkkaDev {
         return Http
                 .get(actorSystem)
                 .<Uri>cachedHostConnectionPool(
-                    ConnectHttp.toHost(uri.toString()), mat);
+                        ConnectHttp.toHost(uri.toString()), mat);
     }
 
-    public Sink<JsonNode, CompletionStage<?>> jsonNodeHttpSink(Uri uri) {
-        return jsonNodeToBytes(false).toMat(httpSinkFlow(uri), (u, m) -> m);
+    public Sink<JsonNode, CompletionStage<String>> jsonNodeHttpSink(Uri uri) {
+        return jsonNodeToBytes(false).toMat(httpSinkFlow(uri), Keep.right());
     }
 
     public Sink<JsonNode, CompletionStage<IOResult>> jsonNodeOutputStreamSink(Supplier<OutputStream> outputStream, boolean pretty) {
         return jsonNodeToBytes(pretty)
-                .toMat(StreamConverters.fromOutputStream(outputStream::get, true), (u, m) -> m);
+                .toMat(StreamConverters.fromOutputStream(outputStream::get, true), Keep.right());
     }
 
     public Source<JsonNode, NotUsed> inputStreamJsonNodeSource(Supplier<InputStream> stream) {
@@ -102,7 +97,7 @@ public class AkkaDev {
                 .mapMaterializedValue(v -> NotUsed.getInstance());
     }
 
-    public Sink<ByteString, CompletionStage<String>> httpSinkFlow(Uri uri) {
+    Sink<ByteString, CompletionStage<String>> httpSinkFlow(Uri uri) {
         return Flow.of(ByteString.class)
                 .prefixAndTail(0)
                 .map(pair -> {
@@ -123,13 +118,13 @@ public class AkkaDev {
                 .mapMaterializedValue(f -> f.thenApply(ByteString::utf8String));
     }
 
-    public static final Flow<ByteString, JsonNode, akka.NotUsed> bytesToJsonNode = Flow
+    static final Flow<ByteString, JsonNode, akka.NotUsed> bytesToJsonNode = Flow
             .of(ByteString.class)
             .via(jsonSupport.framingDecoder())
             .map(bytes -> mapper.readValue(bytes.toArray(), JsonNode.class))
             .named("bytes-to-json-node");
 
-    public static Flow<JsonNode, ByteString, akka.NotUsed> jsonNodeToBytes(boolean pretty) {
+    static Flow<JsonNode, ByteString, akka.NotUsed> jsonNodeToBytes(boolean pretty) {
         final ObjectWriter objectWriter = pretty ? prettyWriter : writer;
         return Flow
                 .of(JsonNode.class)
@@ -170,22 +165,7 @@ public class AkkaDev {
         return Flow.of(JsonNode.class).mapConcat(jsonConverter::convert);
     }
 
-    public Source<String, NotUsed> writeStream(Source<JsonNode, ?> source, String url) {
-        HttpEntity.Chunked data = HttpEntities.create(ContentTypes.APPLICATION_JSON, source
-                .via(jsonNodeToBytes(false))
-                .via(jsonSupport.framingRenderer()));
-
-        HttpRequest request = HttpRequest.POST(url).withEntity(data);
-        CompletionStage<HttpResponse> f = Http.get(actorSystem)
-                .singleRequest(request, mat);
-
-        return Source.fromCompletionStage(f)
-                .flatMapConcat(r -> r.entity()
-                        .getDataBytes().fold("", (s, a) -> s + a.utf8String()));
-    }
-
-
-    public static Flow<ByteString, JsonNode, akka.NotUsed> bytesToJsonNode() {
+    static Flow<ByteString, JsonNode, akka.NotUsed> bytesToJsonNode() {
         return Flow
                 .of(ByteString.class)
                 .via(jsonSupport.framingDecoder())
