@@ -1,30 +1,45 @@
 package eu.ehri.project.indexing;
 
+import akka.Done;
+import akka.NotUsed;
+import akka.actor.ActorSystem;
+import akka.http.javadsl.model.Uri;
+import akka.stream.ActorMaterializer;
+import akka.stream.IOResult;
+import akka.stream.Materializer;
+import akka.stream.javadsl.Broadcast;
+import akka.stream.javadsl.Concat;
+import akka.stream.javadsl.Flow;
+import akka.stream.javadsl.GraphDSL;
+import akka.stream.javadsl.Sink;
+import akka.stream.javadsl.Source;
+import akka.stream.javadsl.StreamConverters;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.base.Splitter;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
-import eu.ehri.project.indexing.converter.Converter;
-import eu.ehri.project.indexing.converter.impl.JsonConverter;
-import eu.ehri.project.indexing.converter.impl.NoopConverter;
+import eu.ehri.project.indexing.akka.AkkaDev;
 import eu.ehri.project.indexing.index.Index;
 import eu.ehri.project.indexing.index.impl.SolrIndex;
-import eu.ehri.project.indexing.sink.Sink;
-import eu.ehri.project.indexing.sink.impl.CallbackSink;
-import eu.ehri.project.indexing.sink.impl.IndexJsonSink;
-import eu.ehri.project.indexing.sink.impl.OutputStreamJsonSink;
-import eu.ehri.project.indexing.source.Source;
-import eu.ehri.project.indexing.source.impl.FileJsonSource;
-import eu.ehri.project.indexing.source.impl.InputStreamJsonSource;
-import eu.ehri.project.indexing.source.impl.WebJsonSource;
-import eu.ehri.project.indexing.utils.Stats;
-import org.apache.commons.cli.*;
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.CommandLineParser;
+import org.apache.commons.cli.DefaultParser;
+import org.apache.commons.cli.HelpFormatter;
+import org.apache.commons.cli.Option;
+import org.apache.commons.cli.Options;
+import org.apache.commons.cli.ParseException;
 
 import javax.ws.rs.core.UriBuilder;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
+import java.util.stream.Collectors;
 
 /**
  * Pull data from the EHRI REST API and index it in Solr.
@@ -115,7 +130,7 @@ public class IndexHelper {
 
 
     @SuppressWarnings("static-access")
-    public static void main(String[] args) throws IOException, ParseException {
+    public static void main(String[] args) throws IOException, ParseException, ExecutionException, InterruptedException {
 
         // Long opts
         final String PRINT = "print";
@@ -207,114 +222,102 @@ public class IndexHelper {
         String solrUrl = cmd.getOptionValue(SOLR_URL, DEFAULT_SOLR_URL);
         Properties restHeaders = cmd.getOptionProperties(HEADERS);
 
-        Pipeline.Builder<JsonNode, JsonNode> builder = new Pipeline.Builder<>();
+        final ActorSystem system = ActorSystem.create("Test");
+        final Materializer mat = ActorMaterializer.create(system);
+
+        AkkaDev streams = new AkkaDev(system, mat);
 
         // Initialize the index...
         Index index = new SolrIndex(solrUrl);
 
-        // Determine if we're printing the data...
-        if (!cmd.hasOption(INDEX) || cmd.hasOption(PRINT) || cmd.hasOption(PRETTY)) {
-            builder.addSink(new OutputStreamJsonSink(System.out, cmd.hasOption(PRETTY)));
+        List<Source<JsonNode, ?>> sources = Lists.newArrayList();
+        List<Flow<JsonNode, JsonNode, ?>> converters = Lists.newArrayList();
+
+        if (cmd.hasOption(FILE)) {
+            try {
+                for (String fileName : cmd.getOptionValues(FILE)) {
+                    if (fileName.trim().equals("-")) {
+                        sources.add(streams.inputStreamJsonNodeSource(() -> System.in));
+                    } else {
+                        System.err.println("Adding file source: " + fileName);
+                        FileInputStream fileInputStream = new FileInputStream(new File(fileName));
+                        sources.add(streams.inputStreamJsonNodeSource(() -> fileInputStream));
+                    }
+                }
+            } catch (FileNotFoundException e) {
+                System.err.println(e.getMessage());
+                System.exit(ErrCodes.BAD_SOURCE_ERR.getCode());
+            }
         }
+
+        Uri[] uris = urlsFromSpecs(ehriUrl, cmd.getArgs())
+                .stream()
+                .map(u -> Uri.create(u.toString()))
+                .collect(Collectors.toList())
+                .toArray(new Uri[cmd.getArgs().length]);
+        sources.add(streams
+                .httpRequestSource(uris)
+                .via(streams.requestsToJsonNode(Uri.create(ehriUrl))));
 
         // Determine if we need to actually index the data...
-        if (cmd.hasOption(INDEX)) {
-            builder.addSink(new IndexJsonSink(index, new IndexJsonSink.EventHandler() {
-                @Override
-                public void handleEvent(Object event) {
-                    System.err.println(event);
-                }
-            }));
+//        if (cmd.hasOption(INDEX)) {
+//            sinks.add(streams.jsonNodeHttpSink(Uri.create(solrUrl + "/update?commit=true")));
+//        }
+
+//        // Determine if we're printing the data...
+//        if (!cmd.hasOption(INDEX) || cmd.hasOption(PRINT) || cmd.hasOption(PRETTY)) {
+//            System.err.println("Adding out sink...");
+//            sinks.add(streams.jsonNodeOutputStreamSink(() -> System.out, cmd.hasOption(PRETTY)));
+//        }
+
+        if (!cmd.hasOption(NO_CONVERT)) {
+            converters.add(streams.jsonNodeToDoc());
         }
 
-        // Determine if we want to convert the data or print the incoming
-        // JSON as-is...
-        builder.addConverter(cmd.hasOption(NO_CONVERT)
-                ? new NoopConverter<JsonNode>()
-                : new JsonConverter());
+        Source<JsonNode, NotUsed> allSrc = combineSources(sources);
+        Flow<JsonNode, JsonNode, NotUsed> allConverters = chainConverters(converters);
 
-        // See if we want to print stats... if so create a callback sink
-        // to count the individual items and optionally print them...
-        if (cmd.hasOption(VERBOSE) || cmd.hasOption(STATS)) {
-            final Stats stats = new Stats();
-            final boolean printStats = cmd.hasOption(STATS);
-            final boolean printItems = cmd.hasOption(VERBOSE);
-            CallbackSink.Callback<JsonNode> cb = new CallbackSink.Callback<JsonNode>() {
-                @Override
-                public void call(JsonNode jsonNode) {
-                    stats.incrementCount();
-                    if (printItems) {
-                        System.err.println(jsonNode.path("type").asText()
-                                + " -> " + jsonNode.path("id").asText());
-                    }
-                }
+        Sink<JsonNode, CompletionStage<IOResult>> printSink = !cmd.hasOption(INDEX) || cmd.hasOption(PRINT) || cmd.hasOption(PRETTY)
+                ? streams.jsonNodeOutputStreamSink(() -> System.out, true)
+                : Sink.<JsonNode>ignore().mapMaterializedValue(f -> f.thenApply(d -> IOResult.createSuccessful(0L)));
 
-                @Override
-                public void finish() {
-                    if (printStats) {
-                        stats.printReport(System.err);
-                    }
-                }
-            };
+        Sink<JsonNode, CompletionStage<?>> solrSink = cmd.hasOption(INDEX)
+                ? streams.jsonNodeHttpSink(Uri.create(solrUrl + "/update?commit=true"))
+                : Sink.<JsonNode>ignore().mapMaterializedValue(f -> f.thenApply(d -> IOResult.createSuccessful(0L)));
 
-            builder.addSink(new CallbackSink<>(cb));
+        allSrc.via(allConverters)
+                .alsoToMat(printSink, (u, m) -> m)
+                .toMat(solrSink, (u, m) -> m).run(mat)
+        .toCompletableFuture().get();
+
+        system.terminate();
+    }
+
+    private static Flow<JsonNode, JsonNode, NotUsed> chainConverters(List<Flow<JsonNode, JsonNode, ?>> converters) {
+        if (converters.size() == 0) {
+            return Flow.of(JsonNode.class);
+        } else if (converters.size() == 1) {
+            return converters.get(0).mapMaterializedValue(f -> NotUsed.getInstance());
+        } else {
+            Flow<JsonNode, JsonNode, ?> first = converters.get(0);
+            Flow<JsonNode, JsonNode, ?> second = converters.get(1);
+            List<Flow<JsonNode, JsonNode, ?>> rest = converters.subList(2, converters.size());
+            return first.via(second)
+                    .mapMaterializedValue(f -> NotUsed.getInstance())
+                    .via(chainConverters(rest));
         }
+    }
 
-        // Determine the source, either stdin, a file, or the rest service.
-        if (cmd.hasOption(FILE)) {
-            for (String fileName : cmd.getOptionValues(FILE)) {
-                if (fileName.trim().equals("-")) {
-                    builder.addSource(new InputStreamJsonSource(System.in));
-                } else {
-                    builder.addSource(new FileJsonSource(fileName));
-                }
-            }
-        }
-
-        // Parse the command line specs...
-        for (URI uri : urlsFromSpecs(ehriUrl, cmd.getArgs())) {
-            builder.addSource(new WebJsonSource(uri, restHeaders));
-        }
-
-        try {
-            // Check if we need to clear anything in index... do this if we're NOT indexing.
-            boolean commitOnDelete = !cmd.hasOption(INDEX);
-            if (cmd.hasOption(CLEAR_ALL)) {
-                index.deleteAll(commitOnDelete);
-            } else {
-                if (cmd.hasOption(CLEAR_ID)) {
-                    String[] ids = cmd.getOptionValues(CLEAR_ID);
-                    index.deleteItems(Lists.newArrayList(ids), commitOnDelete);
-                }
-                if (cmd.hasOption(CLEAR_TYPE)) {
-                    String[] types = cmd.getOptionValues(CLEAR_TYPE);
-                    index.deleteTypes(Lists.newArrayList(types), commitOnDelete);
-                }
-                if (cmd.hasOption(CLEAR_KEY_VALUE)) {
-                    Properties kvs = cmd.getOptionProperties(CLEAR_KEY_VALUE);
-                    for (String key : kvs.stringPropertyNames()) {
-                        index.deleteByFieldValue(key, kvs.getProperty(key), commitOnDelete);
-                    }
-                }
-            }
-
-            // Now do the main indexing tasks
-            builder.build().run();
-        } catch (Source.SourceException e) {
-            System.err.println(e.getMessage());
-            System.exit(ErrCodes.BAD_SOURCE_ERR.getCode());
-        } catch (Converter.ConverterException e) {
-            System.err.println(e.getMessage());
-            System.exit(ErrCodes.BAD_CONVERSION_ERR.getCode());
-        } catch (Sink.SinkException e) {
-            System.err.println(e.getMessage());
-            System.exit(ErrCodes.BAD_SINK_ERR.getCode());
-        } catch (Index.IndexException e) {
-            System.err.println(e.getMessage());
-            System.exit(ErrCodes.INDEX_ERR.getCode());
-        } catch (IllegalStateException e) {
-            System.err.println(e.getMessage());
-            System.exit(ErrCodes.BAD_STATE_ERR.getCode());
+    private static Source<JsonNode, NotUsed> combineSources(List<Source<JsonNode, ?>> sources) {
+        if (sources.size() == 0) {
+            return Source.empty();
+        } else if (sources.size() == 1) {
+            return sources.get(0).mapMaterializedValue(f -> NotUsed.getInstance());
+        } else {
+            Source<JsonNode, ?> first = sources.get(0);
+            Source<JsonNode, ?> second = sources.get(1);
+            List<Source<JsonNode, ?>> rest = sources.subList(2, sources.size());
+            return Source.combine(first, second, rest, Concat::create);
         }
     }
 }
