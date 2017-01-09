@@ -33,6 +33,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.util.List;
 import java.util.Properties;
@@ -233,19 +234,8 @@ public class IndexHelper {
         List<Flow<JsonNode, JsonNode, ?>> converters = Lists.newArrayList();
 
         if (cmd.hasOption(FILE)) {
-            try {
-                for (String fileName : cmd.getOptionValues(FILE)) {
-                    if (fileName.trim().equals("-")) {
-                        sources.add(streams.inputStreamJsonNodeSource(() -> System.in));
-                    } else {
-                        System.err.println("Adding file source: " + fileName);
-                        FileInputStream fileInputStream = new FileInputStream(new File(fileName));
-                        sources.add(streams.inputStreamJsonNodeSource(() -> fileInputStream));
-                    }
-                }
-            } catch (FileNotFoundException e) {
-                System.err.println(e.getMessage());
-                System.exit(ErrCodes.BAD_SOURCE_ERR.getCode());
+            for (String fileName : cmd.getOptionValues(FILE)) {
+                sources.add(streams.inputStreamJsonNodeSource(() -> getInputStream(fileName)));
             }
         }
 
@@ -257,17 +247,6 @@ public class IndexHelper {
         sources.add(streams
                 .httpRequestSource(uris)
                 .via(streams.requestsToJsonNode(Uri.create(ehriUrl))));
-
-        // Determine if we need to actually index the data...
-//        if (cmd.hasOption(INDEX)) {
-//            sinks.add(streams.jsonNodeHttpSink(Uri.create(solrUrl + "/update?commit=true")));
-//        }
-
-//        // Determine if we're printing the data...
-//        if (!cmd.hasOption(INDEX) || cmd.hasOption(PRINT) || cmd.hasOption(PRETTY)) {
-//            System.err.println("Adding out sink...");
-//            sinks.add(streams.jsonNodeOutputStreamSink(() -> System.out, cmd.hasOption(PRETTY)));
-//        }
 
         if (!cmd.hasOption(NO_CONVERT)) {
             converters.add(streams.jsonNodeToDoc());
@@ -302,6 +281,18 @@ public class IndexHelper {
         }
 
         system.terminate();
+    }
+
+    private static InputStream getInputStream(String fileName) {
+        if (fileName.trim().equals("-")) {
+            return System.in;
+        } else {
+            try {
+                return new FileInputStream(new File(fileName));
+            } catch (FileNotFoundException e) {
+                throw new RuntimeException(e);
+            }
+        }
     }
 
     private static Flow<JsonNode, JsonNode, NotUsed> chainConverters(List<Flow<JsonNode, JsonNode, ?>> converters) {
